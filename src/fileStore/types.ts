@@ -3,7 +3,8 @@ import type { LedgerSnapshot, UndoLanes } from "../domain/undo";
 
 export const SCHEMA_VERSION = 1;
 export const UNDO_CAP = 10;
-export const FILE_EXTENSION = ".monthledger.json";
+/** Chromium File System Access: each extension must be ≤16 chars (`.monthledger.json` is 17). */
+export const FILE_EXTENSION = ".monthledger";
 
 export type LedgerDocument = {
   schemaVersion: number;

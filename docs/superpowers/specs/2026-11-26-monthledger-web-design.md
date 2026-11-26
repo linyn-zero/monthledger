@@ -5,9 +5,9 @@
 
 ## 1. 目标
 
-将「收支台账」以 **Chrome/Edge 纯静态 Web** 交付：访客打开 GitHub Pages 即可用；账本只存在本机 `.monthledger.json`；无账号、无云端同步、无服务器。
+将「收支台账」以 **Chrome/Edge 纯静态 Web** 交付：访客打开 GitHub Pages 即可用；账本只存在本机 `.monthledger`；无账号、无云端同步、无服务器。
 
-产品界面名仍为 **收支台账**；仓库与文件格式名为 **monthledger** / **`.monthledger.json`**。
+产品界面名仍为 **收支台账**；仓库与文件格式名为 **monthledger** / **`.monthledger`**（内容为 JSON；Chromium `showSaveFilePicker` 要求扩展名 ≤16 字符，故不用 `.monthledger.json`）。
 
 ## 2. 非目标
 
@@ -24,7 +24,7 @@
 
 ```
 ui (React) → adapter → domain（纯计算）
-                ↘ fileStore → 本机 .monthledger.json
+                ↘ fileStore → 本机 .monthledger
                      ↕ IndexedDB 存 FileSystemFileHandle（刷新恢复）
 ```
 

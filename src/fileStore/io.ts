@@ -9,7 +9,7 @@ import {
 import type { UndoLanes } from "../domain/undo";
 
 const ACCEPT = {
-  "application/json": [".json", FILE_EXTENSION]
+  "application/json": [FILE_EXTENSION]
 };
 
 export async function writeDocument(

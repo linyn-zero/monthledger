@@ -90,7 +90,7 @@ export function App({ session }: AppProps) {
       <div className="file-gate">
         <h1 className="file-gate__brand">收支台账</h1>
         <p className="file-gate__hint">
-          账本保存在你本机的 .monthledger.json 文件中，不会上传到服务器。请使用
+          账本保存在你本机的 .monthledger 文件中（JSON 文本），不会上传到服务器。请使用
           Chrome 或 Edge。
         </p>
         {bootError ? <p className="file-gate__error">{bootError}</p> : null}
