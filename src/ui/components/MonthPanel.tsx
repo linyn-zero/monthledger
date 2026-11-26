@@ -1,0 +1,914 @@
+﻿import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { compareYearMonth } from "../../domain/calendar";
+import { DateField } from "./DateField";
+import {
+  creditDirectionOf,
+  creditLineKind,
+  creditRemainingCents,
+  creditVisibleInMonth,
+  payoffRepaymentId
+} from "../../domain/credit";
+import { displayCents, effectiveSpreadDaily } from "../../domain/formulas";
+import { formatYuanFromCents, yuanToCents } from "../../domain/money";
+import type { CreditMarker, Kind, LineItem, RecurringRule } from "../../domain/types";
+import { creditUi } from "../creditCopy";
+import { ConfirmAmount } from "./ConfirmAmount";
+
+export type MonthPanelProps = {
+  month: string | null;
+  items: LineItem[];
+  ledgerItems?: LineItem[];
+  markers?: CreditMarker[];
+  rules?: RecurringRule[];
+  onLedgerChange?: () => void | Promise<void>;
+};
+
+const SAVE_FAILED = "未保存，数据未改动";
+
+function statusLabel(item: LineItem): string {
+  if (item.status === "confirmed") return "已确认";
+  if (item.kind === "income") return "待发";
+  return "待付";
+}
+
+function formatMonthTitle(month: string): string {
+  const [y, m] = month.split("-");
+  return `${y}年${Number(m)}月`;
+}
+
+function parseYuan(raw: string): number | null {
+  const cleaned = raw.replace(/,/g, "").trim();
+  if (cleaned === "") return null;
+  const yuan = Number(cleaned);
+  if (!Number.isFinite(yuan)) return null;
+  return yuanToCents(yuan);
+}
+
+function sortByExpectedDate(items: LineItem[]): LineItem[] {
+  return [...items].sort((a, b) => {
+    if (a.expectedDate == null && b.expectedDate == null) return 0;
+    if (a.expectedDate == null) return 1;
+    if (b.expectedDate == null) return -1;
+    return a.expectedDate.localeCompare(b.expectedDate);
+  });
+}
+
+function columnTotalCents(items: LineItem[]): number {
+  return items.reduce((sum, item) => sum + displayCents(item), 0);
+}
+
+function AmountEditor({
+  cents,
+  ariaLabel,
+  onSave,
+  onCancel
+}: {
+  cents: number;
+  ariaLabel: string;
+  onSave: (raw: string) => Promise<boolean>;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(() => formatYuanFromCents(cents));
+  const inputRef = useRef<HTMLInputElement>(null);
+  const busyRef = useRef(false);
+  const cancelledRef = useRef(false);
+
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.focus();
+    el.select();
+  }, []);
+
+  async function commit() {
+    if (busyRef.current || cancelledRef.current) return;
+    busyRef.current = true;
+    const closed = await onSave(value);
+    if (!closed) busyRef.current = false;
+  }
+
+  function cancel() {
+    cancelledRef.current = true;
+    onCancel();
+  }
+
+  return (
+    <input
+      ref={inputRef}
+      className="month-panel__amount month-panel__amount-input"
+      aria-label={ariaLabel}
+      value={value}
+      inputMode="decimal"
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => setValue(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void commit();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          cancel();
+        }
+      }}
+      onBlur={() => {
+        void commit();
+      }}
+    />
+  );
+}
+
+function NameEditor({
+  name,
+  ariaLabel,
+  onSave,
+  onCancel
+}: {
+  name: string;
+  ariaLabel: string;
+  onSave: (raw: string) => Promise<boolean>;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(name);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const busyRef = useRef(false);
+  const cancelledRef = useRef(false);
+
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.focus();
+    el.select();
+  }, []);
+
+  async function commit() {
+    if (busyRef.current || cancelledRef.current) return;
+    busyRef.current = true;
+    const closed = await onSave(value);
+    if (!closed) busyRef.current = false;
+  }
+
+  function cancel() {
+    cancelledRef.current = true;
+    onCancel();
+  }
+
+  return (
+    <input
+      ref={inputRef}
+      className="month-panel__name month-panel__name-input"
+      aria-label={ariaLabel}
+      value={value}
+      onClick={(e) => e.stopPropagation()}
+      onChange={(e) => setValue(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void commit();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          cancel();
+        }
+      }}
+      onBlur={() => {
+        void commit();
+      }}
+    />
+  );
+}
+
+function AddRepaymentForm({
+  creditId,
+  creditor,
+  month,
+  copy,
+  onAdded,
+  onError
+}: {
+  creditId: string;
+  creditor: string;
+  month: string;
+  copy: ReturnType<typeof creditUi>;
+  onAdded: () => void | Promise<void>;
+  onError: (message: string | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [date, setDate] = useState(`${month}-01`);
+  const [amount, setAmount] = useState("");
+  const [editingDate, setEditingDate] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLFormElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  useEffect(() => {
+    setDate(`${month}-01`);
+  }, [month]);
+
+  useLayoutEffect(() => {
+    if (!open || !btnRef.current || !popRef.current) return;
+    const rect = btnRef.current.getBoundingClientRect();
+    const box = popRef.current.getBoundingClientRect();
+    const gap = 6;
+    const top = rect.top - box.height - gap;
+    let left = rect.right - box.width;
+    if (left < 8) left = 8;
+    if (left + box.width > window.innerWidth - 8) {
+      left = Math.max(8, window.innerWidth - box.width - 8);
+    }
+    setPos({ top, left });
+  }, [open, date, amount]);
+
+  useEffect(() => {
+    if (!open) return;
+    function handlePointer(event: PointerEvent) {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (btnRef.current?.contains(target)) return;
+      if (popRef.current?.contains(target)) return;
+      if (target instanceof Element && target.closest(".month-panel__picker")) {
+        return;
+      }
+      setOpen(false);
+      setPickerOpen(false);
+      setEditingDate(false);
+    }
+    document.addEventListener("pointerdown", handlePointer, true);
+    return () => document.removeEventListener("pointerdown", handlePointer, true);
+  }, [open]);
+
+  async function submit() {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !date.startsWith(`${month}-`)) {
+      onError("日期不合法");
+      return;
+    }
+    const amountCents = parseYuan(amount);
+    if (amountCents == null || amountCents <= 0) {
+      onError("还款金额必须大于 0");
+      return;
+    }
+    try {
+      await window.ledgerApi.addRepayment({
+        creditId,
+        expectedDate: date,
+        amountCents
+      });
+      setAmount("");
+      setOpen(false);
+      setPickerOpen(false);
+      onError(null);
+      await onAdded();
+    } catch {
+      onError(SAVE_FAILED);
+    }
+  }
+
+  return (
+    <span className="month-panel__anchor">
+      <button
+        ref={btnRef}
+        type="button"
+        className="month-panel__repay-btn"
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen((value) => !value);
+          setPickerOpen(false);
+        }}
+      >
+        {copy.addBtn}
+      </button>
+      {open
+        ? createPortal(
+            <form
+              ref={popRef}
+              className="month-panel__repay-pop"
+              style={
+                pos
+                  ? { top: pos.top, left: pos.left }
+                  : { top: 0, left: 0, visibility: "hidden" }
+              }
+              onClick={(e) => e.stopPropagation()}
+              onSubmit={(e) => {
+                e.preventDefault();
+                void submit();
+              }}
+            >
+              <DateField
+                name={copy.dateName(creditor)}
+                month={month}
+                expectedDate={date}
+                spreadOn={false}
+                allowEveryday={false}
+                editing={editingDate}
+                pickerOpen={pickerOpen}
+                onStartEdit={() => {
+                  setPickerOpen(false);
+                  setEditingDate(true);
+                }}
+                onCancelEdit={() => setEditingDate(false)}
+                onOpenPicker={() => {
+                  setEditingDate(false);
+                  setPickerOpen((value) => !value);
+                }}
+                onClosePicker={() => setPickerOpen(false)}
+                onChange={(raw) => {
+                  setDate(raw.trim() === "" ? `${month}-01` : raw.trim());
+                  setEditingDate(false);
+                  setPickerOpen(false);
+                }}
+              />
+              <input
+                className="month-panel__amount month-panel__amount-input"
+                aria-label={copy.amountAria(creditor)}
+                value={amount}
+                inputMode="decimal"
+                placeholder="0"
+                onChange={(e) => setAmount(e.target.value)}
+              />
+              <button type="submit" className="confirm-amount__button">
+                记下
+              </button>
+            </form>,
+            document.body
+          )
+        : null}
+    </span>
+  );
+}
+
+export function MonthPanel({
+  month,
+  items,
+  ledgerItems,
+  markers = [],
+  rules = [],
+  onLedgerChange
+}: MonthPanelProps) {
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [editingAmountId, setEditingAmountId] = useState<string | null>(null);
+  const [editingDateId, setEditingDateId] = useState<string | null>(null);
+  const [pickerItemId, setPickerItemId] = useState<string | null>(null);
+  const [editingNameId, setEditingNameId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [newName, setNewName] = useState("");
+  const [newKind, setNewKind] = useState<Kind>("expense");
+  const [newAmount, setNewAmount] = useState("");
+  const [newDate, setNewDate] = useState("");
+  const [collapsedCredits, setCollapsedCredits] = useState<Record<string, boolean>>(
+    {}
+  );
+
+  if (month == null) {
+    return (
+      <aside className="month-panel month-panel--empty">
+        <p className="month-panel__hint">点选月份列查看清单</p>
+      </aside>
+    );
+  }
+
+  const activeMonth: string = month;
+  const ledger = ledgerItems ?? items;
+  function ledgerKind(item: LineItem): Kind {
+    if (item.creditId && item.creditRole) {
+      return creditLineKind(
+        creditDirectionOf(markers.find((marker) => marker.id === item.creditId)),
+        item.creditRole
+      );
+    }
+    return item.kind;
+  }
+  const incomeItems = sortByExpectedDate(
+    items.filter((item) => ledgerKind(item) === "income")
+  );
+  const expenseItems = sortByExpectedDate(
+    items.filter((item) => {
+      const kind = ledgerKind(item);
+      return kind === "expense" || kind === "debt_repay";
+    })
+  );
+  const visibleCreditIds = [
+    ...new Set(
+      ledger
+        .filter((item) => item.creditRole === "loan_in" && item.creditId)
+        .map((item) => item.creditId as string)
+    )
+  ].filter((creditId) => creditVisibleInMonth(ledger, creditId, month));
+
+  async function handleConfirm(itemId: string, actualCents: number) {
+    try {
+      await window.ledgerApi.confirmItem(itemId, actualCents);
+      setConfirmingId(null);
+      setError(null);
+      await onLedgerChange?.();
+    } catch {
+      setError(SAVE_FAILED);
+    }
+  }
+
+  async function handleUnconfirm(itemId: string) {
+    try {
+      await window.ledgerApi.unconfirmItem(itemId);
+      setConfirmingId(null);
+      setError(null);
+      await onLedgerChange?.();
+    } catch {
+      setError(SAVE_FAILED);
+    }
+  }
+
+  async function handleDateChange(item: LineItem, raw: string) {
+    const expectedDate = raw.trim() === "" ? null : raw.trim();
+    const rule = rules.find((row) => row.id === item.ruleId) ?? null;
+    const nextSpread =
+      item.creditRole == null &&
+      (item.kind === "income" || item.kind === "expense")
+        ? item.ruleId != null && rule != null && rule.spreadDaily
+          ? false
+          : null
+        : item.spreadDaily;
+    try {
+      await window.ledgerApi.updateExpectedDate(item.id, expectedDate);
+      if (
+        item.creditRole == null &&
+        (item.kind === "income" || item.kind === "expense") &&
+        item.spreadDaily !== nextSpread
+      ) {
+        await window.ledgerApi.updateSpreadDaily(item.id, nextSpread);
+      }
+      setEditingDateId(null);
+      setPickerItemId(null);
+      setError(null);
+      await onLedgerChange?.();
+    } catch {
+      setError(SAVE_FAILED);
+    }
+  }
+
+  async function handleAmountSave(itemId: string, raw: string): Promise<boolean> {
+    const amountCents = parseYuan(raw);
+    if (amountCents == null || amountCents <= 0) {
+      setEditingAmountId(null);
+      return true;
+    }
+    try {
+      await window.ledgerApi.updatePlannedAmount(itemId, amountCents);
+      setEditingAmountId(null);
+      setError(null);
+      await onLedgerChange?.();
+      return true;
+    } catch {
+      setError(SAVE_FAILED);
+      return false;
+    }
+  }
+
+  async function handleNameSave(
+    itemId: string,
+    currentName: string,
+    raw: string
+  ): Promise<boolean> {
+    const trimmed = raw.trim();
+    if (trimmed === "" || trimmed === currentName) {
+      setEditingNameId(null);
+      return true;
+    }
+    try {
+      await window.ledgerApi.updateItemName(itemId, trimmed);
+      setEditingNameId(null);
+      setError(null);
+      await onLedgerChange?.();
+      return true;
+    } catch {
+      setError(SAVE_FAILED);
+      return false;
+    }
+  }
+
+  async function handleAddLine() {
+    const trimmed = newName.trim();
+    const amountCents = parseYuan(newAmount);
+    if (!trimmed || amountCents == null) return;
+    const expectedDate = newDate.trim() === "" ? null : newDate.trim();
+    try {
+      await window.ledgerApi.addManualLine({
+        month: activeMonth,
+        name: trimmed,
+        kind: newKind,
+        amountCents,
+        expectedDate
+      });
+      setNewName("");
+      setNewAmount("");
+      setNewDate("");
+      setError(null);
+      await onLedgerChange?.();
+    } catch {
+      setError(SAVE_FAILED);
+    }
+  }
+
+  async function handleSpreadChange(item: LineItem, next: boolean) {
+    const rule = rules.find((row) => row.id === item.ruleId) ?? null;
+    const spreadDaily =
+      item.ruleId != null && rule != null && next === rule.spreadDaily
+        ? null
+        : next;
+    try {
+      await window.ledgerApi.updateSpreadDaily(item.id, spreadDaily);
+      setPickerItemId(null);
+      setEditingDateId(null);
+      setError(null);
+      await onLedgerChange?.();
+    } catch {
+      setError(SAVE_FAILED);
+    }
+  }
+
+  function creditorOf(creditId: string): string {
+    return (
+      markers.find((marker) => marker.id === creditId)?.creditor ??
+      ledger.find(
+        (item) => item.creditId === creditId && item.creditRole === "loan_in"
+      )?.name ??
+      ""
+    );
+  }
+
+  function monthRepayments(creditId: string): LineItem[] {
+    return sortByExpectedDate(
+      ledger.filter(
+        (item) =>
+          item.creditId === creditId &&
+          item.creditRole === "loan_repay" &&
+          item.month === month
+      )
+    );
+  }
+
+  function repaymentExceedsPrincipal(creditId: string): boolean {
+    const principal = ledger.find(
+      (item) => item.creditId === creditId && item.creditRole === "loan_in"
+    );
+    if (!principal) return false;
+    const repaid = ledger
+      .filter(
+        (item) =>
+          item.creditId === creditId &&
+          item.creditRole === "loan_repay" &&
+          item.month != null &&
+          compareYearMonth(item.month, activeMonth) <= 0
+      )
+      .reduce((sum, item) => sum + displayCents(item), 0);
+    return repaid > displayCents(principal);
+  }
+
+  function renderRow(
+    item: LineItem,
+    options?: { child?: boolean; surface?: "ledger" | "credit" }
+  ) {
+    const editKey = `${options?.surface ?? "ledger"}:${item.id}`;
+    const isConfirming = confirmingId === editKey;
+    const isEditingAmount = editingAmountId === editKey;
+    const isEditingName = editingNameId === editKey;
+    const rule = rules.find((row) => row.id === item.ruleId) ?? null;
+    const spreadOn = effectiveSpreadDaily(item, rule);
+    const allowEveryday =
+      item.creditRole == null &&
+      (item.kind === "income" || item.kind === "expense");
+    const label = (text: string) => text;
+    return (
+      <li
+        key={editKey}
+        className={
+          options?.child ? "month-panel__row month-panel__row--child" : "month-panel__row"
+        }
+        onClick={(e) => e.stopPropagation()}
+      >
+        {options?.child ? (
+          <span className="month-panel__name-wrap">
+            <span className="month-panel__tag">
+              {
+                creditUi(
+                  creditDirectionOf(
+                    markers.find((marker) => marker.id === item.creditId)
+                  )
+                ).repayTag
+              }
+            </span>
+          </span>
+        ) : isEditingName ? (
+          <NameEditor
+            name={item.name}
+            ariaLabel={label(`修改${item.name}名称`)}
+            onSave={(raw) => handleNameSave(item.id, item.name, raw)}
+            onCancel={() => setEditingNameId(null)}
+          />
+        ) : (
+          <span className="month-panel__name-wrap">
+            <span
+              className="month-panel__name"
+              aria-label={label(`${item.name}名称`)}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                setConfirmingId(null);
+                setEditingAmountId(null);
+                setEditingDateId(null);
+                setPickerItemId(null);
+                setEditingNameId(editKey);
+              }}
+            >
+              {item.name}
+            </span>
+            {item.creditRole === "loan_in" ? (
+              <span className="month-panel__tag">
+                {creditUi(
+                  creditDirectionOf(
+                    markers.find((marker) => marker.id === item.creditId)
+                  )
+                ).principalTag}
+              </span>
+            ) : null}
+            {item.creditRole === "loan_repay" ? (
+              <span className="month-panel__tag">
+                {creditUi(
+                  creditDirectionOf(
+                    markers.find((marker) => marker.id === item.creditId)
+                  )
+                ).repayTag}
+              </span>
+            ) : null}
+          </span>
+        )}
+        <DateField
+          name={label(item.name)}
+          month={activeMonth}
+          expectedDate={item.expectedDate}
+          spreadOn={spreadOn}
+          allowEveryday={allowEveryday}
+          editing={editingDateId === editKey}
+          pickerOpen={pickerItemId === editKey}
+          onStartEdit={() => {
+            if (spreadOn) return;
+            setConfirmingId(null);
+            setEditingAmountId(null);
+            setEditingNameId(null);
+            setPickerItemId(null);
+            setEditingDateId(editKey);
+          }}
+          onCancelEdit={() => setEditingDateId(null)}
+          onOpenPicker={() => {
+            setConfirmingId(null);
+            setEditingAmountId(null);
+            setEditingNameId(null);
+            setEditingDateId(null);
+            setPickerItemId((current) => (current === editKey ? null : editKey));
+          }}
+          onClosePicker={() => setPickerItemId(null)}
+          onChange={(raw) => {
+            void handleDateChange(item, raw);
+          }}
+          onEveryday={
+            allowEveryday
+              ? () => {
+                  void handleSpreadChange(item, true);
+                }
+              : undefined
+          }
+        />
+        {isConfirming ? (
+          <ConfirmAmount
+            plannedCents={item.plannedCents}
+            onConfirm={(cents) => {
+              void handleConfirm(item.id, cents);
+            }}
+            onCancel={() => setConfirmingId(null)}
+          />
+        ) : isEditingAmount ? (
+          <AmountEditor
+            cents={displayCents(item)}
+            ariaLabel={label(`修改${item.name}金额`)}
+            onSave={(raw) => handleAmountSave(item.id, raw)}
+            onCancel={() => setEditingAmountId(null)}
+          />
+        ) : (
+          <span
+            className="month-panel__amount"
+            aria-label={label(`${item.name}金额`)}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              setConfirmingId(null);
+              setEditingDateId(null);
+              setPickerItemId(null);
+              setEditingNameId(null);
+              setEditingAmountId(editKey);
+            }}
+          >
+            {formatYuanFromCents(displayCents(item))}
+          </span>
+        )}
+        {isConfirming ? null : (
+          <span className="month-panel__action">
+            <input
+              type="checkbox"
+              className="month-panel__check"
+              checked={item.status === "confirmed"}
+              aria-label={label(`确认${item.name}`)}
+              onChange={() => {
+                if (item.status === "confirmed") {
+                  void handleUnconfirm(item.id);
+                  return;
+                }
+                setEditingAmountId(null);
+                setEditingDateId(null);
+                setPickerItemId(null);
+                setEditingNameId(null);
+                setConfirmingId(editKey);
+              }}
+            />
+          </span>
+        )}
+        <span className="month-panel__status">{statusLabel(item)}</span>
+      </li>
+    );
+  }
+
+  return (
+    <aside
+      className="month-panel"
+      onClick={() => {
+        setConfirmingId(null);
+        setEditingAmountId(null);
+        setEditingDateId(null);
+        setPickerItemId(null);
+        setEditingNameId(null);
+      }}
+    >
+      <header className="month-panel__header">
+        <h2 className="month-panel__title">{formatMonthTitle(month)}</h2>
+      </header>
+      {error ? <p className="month-panel__error">{error}</p> : null}
+      <div className="month-panel__columns">
+        <section className="month-panel__column" aria-label="收入">
+          <header className="month-panel__column-head">
+            <h3 className="month-panel__column-title">收入</h3>
+            <span className="month-panel__sum">
+              {formatYuanFromCents(columnTotalCents(incomeItems))}
+            </span>
+          </header>
+          <ul className="month-panel__list">
+            {incomeItems.map((item) => renderRow(item))}
+            {incomeItems.length === 0 ? (
+              <li className="month-panel__empty">暂无收入</li>
+            ) : null}
+          </ul>
+        </section>
+        <section className="month-panel__column" aria-label="支出">
+          <header className="month-panel__column-head">
+            <h3 className="month-panel__column-title">支出</h3>
+            <span className="month-panel__sum">
+              {formatYuanFromCents(columnTotalCents(expenseItems))}
+            </span>
+          </header>
+          <ul className="month-panel__list">
+            {expenseItems.map((item) => renderRow(item))}
+            {expenseItems.length === 0 ? (
+              <li className="month-panel__empty">暂无支出</li>
+            ) : null}
+          </ul>
+        </section>
+        <section className="month-panel__column" aria-label="信贷">
+          <header className="month-panel__column-head">
+            <h3 className="month-panel__column-title">信贷</h3>
+          </header>
+          <ul className="month-panel__list">
+            {visibleCreditIds.map((creditId) => {
+              const creditor = creditorOf(creditId);
+              const copy = creditUi(
+                creditDirectionOf(markers.find((marker) => marker.id === creditId))
+              );
+              const repayments = monthRepayments(creditId);
+              const paid = repayments.reduce(
+                (sum, item) => sum + displayCents(item),
+                0
+              );
+              const remaining = creditRemainingCents(ledger, creditId, month);
+              const payoffId = payoffRepaymentId(ledger, creditId, month);
+              const expanded = collapsedCredits[creditId] !== true;
+              return (
+                <li key={creditId} className="month-panel__credit">
+                  <div
+                    className="month-panel__row month-panel__row--parent"
+                    onClick={() => {
+                      setCollapsedCredits((current) => ({
+                        ...current,
+                        [creditId]: expanded
+                      }));
+                    }}
+                  >
+                    <div className="month-panel__parent-meta">
+                      <span className="month-panel__name">{creditor}</span>
+                      <span className="month-panel__parent-stat">
+                        {`${copy.monthPaid} ${formatYuanFromCents(paid)}`}
+                      </span>
+                      {remaining > 0 ? (
+                        <span className="month-panel__parent-stat">
+                          {`剩余 ${formatYuanFromCents(remaining)}`}
+                        </span>
+                      ) : null}
+                    </div>
+                    {payoffId ? (
+                      <span className="month-panel__congrats">
+                        {copy.congrats}
+                      </span>
+                    ) : (
+                      <>
+                        <span />
+                        <span />
+                      </>
+                    )}
+                    <span />
+                    <AddRepaymentForm
+                      creditId={creditId}
+                      creditor={creditor}
+                      month={month}
+                      copy={copy}
+                      onAdded={() => onLedgerChange?.()}
+                      onError={setError}
+                    />
+                  </div>
+                  {expanded ? (
+                    <>
+                      {repaymentExceedsPrincipal(creditId) ? (
+                        <p className="month-panel__warn">{copy.over}</p>
+                      ) : null}
+                      {repayments.length === 0 ? (
+                        <p className="month-panel__empty month-panel__empty--indent">
+                          {copy.emptyKids}
+                        </p>
+                      ) : (
+                        <ul className="month-panel__list month-panel__list--nested">
+                          {repayments.map((item) =>
+                            renderRow(item, { child: true, surface: "credit" })
+                          )}
+                        </ul>
+                      )}
+                    </>
+                  ) : null}
+                </li>
+              );
+            })}
+            {visibleCreditIds.length === 0 ? (
+              <li className="month-panel__empty">暂无信贷</li>
+            ) : null}
+          </ul>
+        </section>
+      </div>
+      <form
+        className="month-panel__add"
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={(e) => {
+          e.preventDefault();
+          void handleAddLine();
+        }}
+      >
+        <p className="month-panel__add-title">加一行</p>
+        <label>
+          新行名称
+          <input
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+          />
+        </label>
+        <label>
+          新行方向
+          <select
+            value={newKind}
+            onChange={(e) => setNewKind(e.target.value as Kind)}
+          >
+            <option value="income">收入</option>
+            <option value="expense">开销</option>
+          </select>
+        </label>
+        <label>
+          新行金额
+          <input
+            value={newAmount}
+            onChange={(e) => setNewAmount(e.target.value)}
+            inputMode="decimal"
+          />
+        </label>
+        <label>
+          新行日期
+          <input
+            type="date"
+            value={newDate}
+            onChange={(e) => setNewDate(e.target.value)}
+          />
+        </label>
+        <button type="submit" className="month-panel__add-submit">
+          加一行
+        </button>
+      </form>
+    </aside>
+  );
+}
