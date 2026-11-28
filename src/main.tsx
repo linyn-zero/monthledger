@@ -4,11 +4,22 @@ import { LedgerSession } from "./adapter/session";
 import { App } from "./ui/App";
 import "./ui/styles.css";
 
-const session = new LedgerSession();
-window.ledgerApi = session.createApi();
+// File System Access API needs a secure context; custom domains often land on http:// first.
+if (
+  window.location.protocol === "http:" &&
+  window.location.hostname !== "localhost" &&
+  window.location.hostname !== "127.0.0.1"
+) {
+  window.location.replace(
+    `https://${window.location.host}${window.location.pathname}${window.location.search}${window.location.hash}`
+  );
+} else {
+  const session = new LedgerSession();
+  window.ledgerApi = session.createApi();
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <App session={session} />
-  </StrictMode>
-);
+  createRoot(document.getElementById("root")!).render(
+    <StrictMode>
+      <App session={session} />
+    </StrictMode>
+  );
+}

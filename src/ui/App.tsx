@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 import type { YearMonth } from "../domain/types";
 import type { LedgerSession } from "../adapter/session";
+import {
+  fileSystemAccessUnavailableReason,
+  supportsFileSystemAccess
+} from "../fileStore/io";
 import { BoardPage } from "./pages/BoardPage";
 import { EntriesPage } from "./pages/EntriesPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -86,19 +90,33 @@ export function App({ session }: AppProps) {
   }
 
   if (page === "picker") {
+    const fsOk = supportsFileSystemAccess();
     return (
       <div className="file-gate">
         <h1 className="file-gate__brand">收支台账</h1>
         <p className="file-gate__hint">
           账本保存在你本机的 .monthledger 文件中（JSON 文本），不会上传到服务器。请使用
-          Chrome 或 Edge。
+          Chrome 或 Edge，并用 HTTPS 打开本站。
         </p>
+        {!fsOk ? (
+          <p className="file-gate__error">{fileSystemAccessUnavailableReason()}</p>
+        ) : null}
         {bootError ? <p className="file-gate__error">{bootError}</p> : null}
         <div className="file-gate__actions">
-          <button type="button" className="file-gate__btn" onClick={() => void onCreate()}>
+          <button
+            type="button"
+            className="file-gate__btn"
+            disabled={!fsOk}
+            onClick={() => void onCreate()}
+          >
             新建账本
           </button>
-          <button type="button" className="file-gate__btn" onClick={() => void onOpen()}>
+          <button
+            type="button"
+            className="file-gate__btn"
+            disabled={!fsOk}
+            onClick={() => void onOpen()}
+          >
             打开账本
           </button>
         </div>

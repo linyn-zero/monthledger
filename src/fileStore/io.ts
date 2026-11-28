@@ -12,6 +12,26 @@ const ACCEPT = {
   "application/json": [FILE_EXTENSION]
 };
 
+export function supportsFileSystemAccess(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    window.isSecureContext === true &&
+    typeof window.showOpenFilePicker === "function" &&
+    typeof window.showSaveFilePicker === "function"
+  );
+}
+
+export function fileSystemAccessUnavailableReason(): string {
+  if (typeof window === "undefined") {
+    return "当前环境无法选择本机文件。";
+  }
+  if (!window.isSecureContext || window.location.protocol === "http:") {
+    const httpsUrl = `https://${window.location.host}${window.location.pathname}${window.location.search}${window.location.hash}`;
+    return `打开/保存账本需要 HTTPS。请改用：${httpsUrl}`;
+  }
+  return "当前浏览器不支持本机文件读写。请使用最新版 Chrome 或 Edge（桌面版）。";
+}
+
 export async function writeDocument(
   handle: FileSystemFileHandle,
   body: LedgerBody | null,
@@ -46,6 +66,9 @@ export async function readDocument(
 }
 
 export async function pickOpenLedgerFile(): Promise<FileSystemFileHandle> {
+  if (!supportsFileSystemAccess()) {
+    throw new Error(fileSystemAccessUnavailableReason());
+  }
   const [handle] = await window.showOpenFilePicker({
     multiple: false,
     types: [{ description: "Month Ledger", accept: ACCEPT }]
@@ -59,6 +82,9 @@ export async function pickOpenLedgerFile(): Promise<FileSystemFileHandle> {
 export async function pickSaveLedgerFile(
   suggestedName = `ledger${FILE_EXTENSION}`
 ): Promise<FileSystemFileHandle> {
+  if (!supportsFileSystemAccess()) {
+    throw new Error(fileSystemAccessUnavailableReason());
+  }
   const handle = await window.showSaveFilePicker({
     suggestedName,
     types: [{ description: "Month Ledger", accept: ACCEPT }]
