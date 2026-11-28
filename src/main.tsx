@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { LedgerSession } from "./adapter/session";
+import { initUmami } from "./lib/analytics";
 import { App } from "./ui/App";
 import "./ui/styles.css";
 
@@ -14,6 +15,8 @@ if (
     `https://${window.location.host}${window.location.pathname}${window.location.search}${window.location.hash}`
   );
 } else {
+  initUmami();
+
   const session = new LedgerSession();
   window.ledgerApi = session.createApi();
 
